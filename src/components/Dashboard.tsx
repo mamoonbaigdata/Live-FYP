@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
-import { ref, onValue, push, set } from "firebase/database";
+import { useRef, useEffect, useState } from "react";
+import { ref, onValue } from "firebase/database";
 import { database, firebaseEnabled } from "@/lib/firebase";
 import MetricCard from "./MetricCard";
-import { Droplets, Thermometer, Beaker, Waves, Activity } from "lucide-react";
-import { useToast } from "@/hooks/use-toast";
-import AcceptableRangesGraph from "./AcceptableRangesGraph";
+import { Droplets, Thermometer, Beaker, Activity } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { useWaterData } from "@/providers/WaterDataProvider";
+import NaegleriaRiskCard from "./NaegleriaRiskCard";
 
 
 interface WaterData {
@@ -16,182 +18,124 @@ interface WaterData {
 type HistoryPoint = { time: number; pH: number; chlorine: number; waterTemperature: number; waterLevel: number };
 
 const Dashboard = () => {
-  const { toast } = useToast();
-  const [data, setData] = useState<WaterData>({
-    pH: 7.2,
-    chlorine: 1.5,
-    waterTemperature: 24.5,
-    waterLevel: 75
-  });
-  // keep latest data accessible from timers without re-subscribing
-  const [dataVersion, setDataVersion] = useState(0);
-  const [isConnected, setIsConnected] = useState(false);
-  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
-  const [lastAlertTimes, setLastAlertTimes] = useState<Record<string, number>>({});
-  const [usingDemo, setUsingDemo] = useState(true);
-  // History no longer used for KPI chart display
+  const { data, isConnected, lastUpdate } = useWaterData();
 
-  // Immediate alerts with short cooldown per metric
-  useEffect(() => {
-    const now = Date.now();
-    const cooldownMs = 6000; // prevent spam while still alerting quickly
+  // Chart data state
+  const [dailyAverages, setDailyAverages] = useState<Array<{ date: string; temp: number; ph: number; chlorine: number; level: number }>>([]);
+  const [storedSeries, setStoredSeries] = useState<Array<{ time: string; temp?: number; ph?: number; chlorine?: number; level?: number }>>([]);
+  const [todayAvgTemp, setTodayAvgTemp] = useState<number | null>(null);
 
-    const shouldAlert = (key: string) => {
-      const last = lastAlertTimes[key] || 0;
-      return now - last > cooldownMs;
-    };
+  // Note: Alerts and Data Simulation/Fetching are now handled globally in WaterDataProvider
 
-    // Chlorine thresholds
-    if (data.chlorine < 1 && shouldAlert('chlorine-low')) {
-      setLastAlertTimes((p) => ({ ...p, 'chlorine-low': now }));
-      toast({
-        title: "⚠️ Low Chlorine Alert",
-        description: `Chlorine ${data.chlorine.toFixed(1)} ppm (< 1.0 ppm)`,
-        variant: "destructive",
-      });
-    }
-    if (data.chlorine > 3.0 && shouldAlert('chlorine-high')) {
-      setLastAlertTimes((p) => ({ ...p, 'chlorine-high': now }));
-      toast({
-        title: "⚠️ High Chlorine Alert",
-        description: `Chlorine ${data.chlorine.toFixed(1)} ppm (> 3.0 ppm)`,
-        variant: "destructive",
-      });
-    }
 
-    // pH range
-    if ((data.pH < 7.4 || data.pH > 7.6) && shouldAlert('ph-out')) {
-      setLastAlertTimes((p) => ({ ...p, 'ph-out': now }));
-      const issue = data.pH < 7.4 ? 'too low' : 'too high';
-      toast({
-        title: "⚠️ pH Out of Range",
-        description: `pH ${data.pH.toFixed(1)} (${issue}) — optimal 7.4–7.6`,
-        variant: "destructive",
-      });
-    }
 
-    // Temperature range
-    if ((data.waterTemperature < 22 || data.waterTemperature > 27) && shouldAlert('temp-out')) {
-      setLastAlertTimes((p) => ({ ...p, 'temp-out': now }));
-      const issue = data.waterTemperature < 22 ? 'too low' : 'too high';
-      toast({
-        title: "⚠️ Temperature Out of Range",
-        description: `Temperature ${data.waterTemperature.toFixed(1)}°C (${issue}) — optimal 22–27°C`,
-        variant: "destructive",
-      });
-    }
-  }, [data, lastAlertTimes, toast]);
-
-  // Simulate real-time updates for demo; stops when Firebase provides data
-  useEffect(() => {
-    if (!usingDemo) return;
-
-    const demoInterval = setInterval(() => {
-      setData(prev => {
-        const next = {
-          pH: Math.max(6, Math.min(8, prev.pH + (Math.random() - 0.5) * 0.3)),
-          chlorine: Math.max(0.5, Math.min(3, prev.chlorine + (Math.random() - 0.5) * 0.2)),
-          waterTemperature: Math.max(20, Math.min(28, prev.waterTemperature + (Math.random() - 0.5) * 0.5)),
-          waterLevel: Math.max(60, Math.min(90, prev.waterLevel + (Math.random() - 0.5) * 2))
-        };
-        // History tracking removed (chart now shows static acceptable ranges)
-        // bump version so timers can reference fresh values
-        setDataVersion(v => v + 1);
-        return next;
-      });
-      setLastUpdate(new Date());
-      setIsConnected(true);
-    }, 1500);
-
-    return () => clearInterval(demoInterval);
-  }, [usingDemo]);
-
-  useEffect(() => {
-    // Skip Firebase subscription if not configured
-    if (!firebaseEnabled || !database) {
-      console.warn("Firebase not configured. Running in demo mode.");
-      return;
-    }
-
-    const dataRef = ref(database, 'waterQuality');
-    const unsubscribe = onValue(
-      dataRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const newData = snapshot.val();
-          setData(newData);
-          setDataVersion(v => v + 1);
-          setLastUpdate(new Date());
-          setIsConnected(true);
-          setUsingDemo(false);
-          console.log("Data updated:", newData);
-          // History tracking removed (chart now shows static acceptable ranges)
-        }
-      },
-      (error) => {
-        console.error("Error reading data:", error);
-        // Demo mode will continue running
-      },
-    );
-
-    return () => unsubscribe();
-  }, [toast]);
-
-  // Hourly persistence to Firebase with date
+  // Subscribe to daily history and compute averages
   useEffect(() => {
     if (!firebaseEnabled || !database) return;
 
-    const saveReading = () => {
-      const now = new Date();
-      const yyyy = now.getFullYear();
-      const mm = String(now.getMonth() + 1).padStart(2, '0');
-      const dd = String(now.getDate()).padStart(2, '0');
-      const dateStr = `${yyyy}-${mm}-${dd}`;
+    const historyRef = ref(database, 'waterQualityHistory');
+    const unsub = onValue(historyRef, (snap) => {
+      const val = snap.val();
+      if (!val || typeof val !== 'object') {
+        setDailyAverages([]);
+        setTodayAvgTemp(null);
+        return;
+      }
+      const entries = Object.entries(val) as Array<[string, any]>;
+      const dayAverages: Array<{ date: string; temp: number; ph: number; chlorine: number; level: number }> = entries.map(([date, list]) => {
+        const arr = Array.isArray(list) ? list : list && typeof list === 'object' ? Object.values(list) : [];
+        const temps = arr.map((it: any) => typeof it?.waterTemperature === 'number' ? it.waterTemperature : parseFloat(String(it?.waterTemperature ?? 'NaN'))).filter((n: number) => Number.isFinite(n));
+        const phs = arr.map((it: any) => typeof it?.pH === 'number' ? it.pH : parseFloat(String(it?.pH ?? 'NaN'))).filter((n: number) => Number.isFinite(n));
+        const chlorines = arr.map((it: any) => typeof it?.chlorine === 'number' ? it.chlorine : parseFloat(String(it?.chlorine ?? 'NaN'))).filter((n: number) => Number.isFinite(n));
+        const levels = arr.map((it: any) => typeof it?.waterLevel === 'number' ? it.waterLevel : parseFloat(String(it?.waterLevel ?? 'NaN'))).filter((n: number) => Number.isFinite(n));
+        const avgT = temps.length ? temps.reduce((a: number, b: number) => a + b, 0) / temps.length : NaN;
+        const avgPH = phs.length ? phs.reduce((a: number, b: number) => a + b, 0) / phs.length : NaN;
+        const avgCl = chlorines.length ? chlorines.reduce((a: number, b: number) => a + b, 0) / chlorines.length : NaN;
+        const avgLvl = levels.length ? levels.reduce((a: number, b: number) => a + b, 0) / levels.length : NaN;
+        return { date, temp: avgT, ph: avgPH, chlorine: avgCl, level: avgLvl };
+      }).filter(d => Number.isFinite(d.temp) || Number.isFinite(d.ph) || Number.isFinite(d.chlorine) || Number.isFinite(d.level));
+      dayAverages.sort((a, b) => a.date.localeCompare(b.date));
 
-      const entry = {
-        timestamp: now.getTime(),
-        date: dateStr,
-        pH: data.pH,
-        chlorine: data.chlorine,
-        waterTemperature: data.waterTemperature,
-        waterLevel: data.waterLevel,
-      };
+      // limit to recent 7 days for chart
+      const recent = dayAverages.slice(-7);
+      setDailyAverages(recent);
 
-      const historyRef = ref(database, `waterQualityHistory/${dateStr}`);
-      const newItemRef = push(historyRef);
-      set(newItemRef, entry).catch((err) => {
-        console.error('Failed to save hourly reading', err);
-      });
+      // chart data now sourced from Mongo via /api/kpi in another effect
+
+      const todayStr = (() => {
+        const now = new Date();
+        const yyyy = now.getFullYear();
+        const mm = String(now.getMonth() + 1).padStart(2, '0');
+        const dd = String(now.getDate()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+      })();
+      const today = dayAverages.find(d => d.date === todayStr);
+      setTodayAvgTemp(today && Number.isFinite(today.temp) ? today.temp : null);
+    }, (err) => {
+      console.error('History read error:', err);
+    });
+
+    return () => unsub();
+  }, [firebaseEnabled, database]);
+
+  // Subscribe to 10-min stored averages for chart
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await fetch('/api/kpi?limit=72');
+        const json = await res.json();
+        const items: Array<any> = Array.isArray(json?.items) ? json.items : [];
+        const cleaned = items
+          .filter(it => typeof it?.timestamp === 'number')
+          .map(it => ({
+            ts: it.timestamp as number,
+            temp: typeof it?.waterTemperature === 'number' ? it.waterTemperature : parseFloat(String(it?.waterTemperature ?? 'NaN')),
+            ph: typeof it?.pH === 'number' ? it.pH : parseFloat(String(it?.pH ?? 'NaN')),
+            chlorine: typeof it?.chlorine === 'number' ? it.chlorine : parseFloat(String(it?.chlorine ?? 'NaN')),
+            level: typeof it?.waterLevel === 'number' ? it.waterLevel : parseFloat(String(it?.waterLevel ?? 'NaN')),
+            dateStr: typeof it?.date === 'string' ? it.date : undefined,
+          }))
+          .filter(it => [it.temp, it.ph, it.chlorine, it.level].some(n => Number.isFinite(n as number)));
+        cleaned.sort((a, b) => a.ts - b.ts);
+        const last72 = cleaned.slice(-72);
+        const series = last72.map(e => {
+          const d = new Date(e.ts);
+          const hh = String(d.getHours()).padStart(2, '0');
+          const mm = String(d.getMinutes()).padStart(2, '0');
+          return {
+            time: `${hh}:${mm}`,
+            temp: Number.isFinite(e.temp) ? e.temp : undefined,
+            ph: Number.isFinite(e.ph) ? e.ph : undefined,
+            chlorine: Number.isFinite(e.chlorine) ? e.chlorine : undefined,
+            level: Number.isFinite(e.level) ? e.level : undefined,
+          };
+        });
+        setStoredSeries(series);
+
+        const todayStr = (() => {
+          const now = new Date();
+          const yyyy = now.getFullYear();
+          const mm = String(now.getMonth() + 1).padStart(2, '0');
+          const dd = String(now.getDate()).padStart(2, '0');
+          return `${yyyy}-${mm}-${dd}`;
+        })();
+        const todays = items.filter(it => it?.date === todayStr && Number.isFinite(parseFloat(String(it?.waterTemperature ?? 'NaN'))));
+        const tvals = todays.map(it => typeof it?.waterTemperature === 'number' ? it.waterTemperature : parseFloat(String(it?.waterTemperature))).filter(n => Number.isFinite(n));
+        const avgToday = tvals.length ? tvals.reduce((a, b) => a + b, 0) / tvals.length : NaN;
+        setTodayAvgTemp(Number.isFinite(avgToday) ? avgToday : null);
+      } catch { }
     };
-
-    // schedule aligned to the next hour
-    const now = new Date();
-    const msToNextHour = (
-      (60 - now.getMinutes()) * 60 * 1000 -
-      now.getSeconds() * 1000 -
-      now.getMilliseconds()
-    );
-
-    const startTimeout = setTimeout(() => {
-      saveReading();
-      const hourly = setInterval(saveReading, 60 * 60 * 1000);
-      // store interval id on window to allow cleanup inside closure
-      (window as any).__hourly_save_id = hourly;
-    }, Math.max(0, msToNextHour));
-
-    return () => {
-      clearTimeout(startTimeout);
-      const hourlyId = (window as any).__hourly_save_id as number | undefined;
-      if (hourlyId) clearInterval(hourlyId);
-    };
-  }, [firebaseEnabled, database, dataVersion]);
+    load();
+    const intId = setInterval(load, 15000);
+    return () => clearInterval(intId);
+  }, []);
 
   return (
     <div className="min-h-screen bg-[var(--gradient-flow)] p-4 md:p-8">
       <div className="max-w-7xl mx-auto">
-        <div className="text-center mb-8">
+        <div className="text-center mb-10">
           <h1 className="text-4xl md:text-5xl font-bold text-foreground mb-2 flex items-center justify-center gap-3">
-            <Waves className="w-10 h-10 text-primary" />
+            <img src="/dashboard-logo.png" alt="Smart Pool Logo" className="h-20 w-auto object-contain drop-shadow-sm" />
             Water Quality Monitor
           </h1>
           <div className="flex items-center justify-center gap-4">
@@ -210,14 +154,14 @@ const Dashboard = () => {
           )}
         </div>
 
-        
+
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
           <MetricCard
             title="pH Level"
             value={data.pH}
             unit="pH"
-            icon={<Droplets className="w-5 h-5 text-water-medium" />}
+            icon={<Droplets className="w-8 h-8 text-water-medium" />}
             min={0}
             max={14}
             colors={["hsl(var(--water-medium))", "hsl(var(--muted))"]}
@@ -226,12 +170,12 @@ const Dashboard = () => {
             borderDelta={0.1}
             iconAnimationClass="animate-pulse"
           />
-          
+
           <MetricCard
             title="Chlorine"
             value={data.chlorine}
             unit="ppm"
-            icon={<Beaker className="w-5 h-5 text-accent" />}
+            icon={<Beaker className="w-8 h-8 text-accent" />}
             min={0}
             max={5}
             colors={["hsl(var(--accent))", "hsl(var(--muted))"]}
@@ -240,12 +184,12 @@ const Dashboard = () => {
             borderDelta={0.2}
             iconAnimationClass="animate-pulse"
           />
-          
+
           <MetricCard
             title="Temperature"
             value={data.waterTemperature}
             unit="°C"
-            icon={<Thermometer className="w-5 h-5 text-water-bright" />}
+            icon={<Thermometer className="w-8 h-8 text-water-bright" />}
             min={0}
             max={40}
             colors={["hsl(var(--water-bright))", "hsl(var(--muted))"]}
@@ -254,25 +198,110 @@ const Dashboard = () => {
             borderDelta={1}
             iconAnimationClass="animate-pulse"
           />
-          
+
           <MetricCard
             title="Water Level"
             value={data.waterLevel}
-            unit="%"
-            icon={<Waves className="w-5 h-5 text-primary" />}
+            unit="cm"
+            icon={<Activity className="w-8 h-8 text-blue-500" />}
             min={0}
             max={100}
-            colors={["hsl(var(--primary))", "hsl(var(--muted))"]}
-            targetMin={60}
-            targetMax={90}
+            colors={["#3b82f6", "hsl(var(--muted))"]}
+            targetMin={80}
+            targetMax={95}
             borderDelta={5}
             iconAnimationClass="animate-pulse"
           />
         </div>
 
-        {/* Standard Values for KPI's */}
+
+
         <div className="mt-8">
-          <AcceptableRangesGraph />
+          <NaegleriaRiskCard data={data} />
+        </div>
+
+        <div className="mt-8">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <Card className="border-border/40 backdrop-blur-sm">
+              <CardHeader>
+                <CardTitle className="text-foreground">Recent Temperature Trend</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={storedSeries.map(d => ({ time: d.time, value: typeof d.temp === 'number' ? Number(d.temp.toFixed(2)) : undefined }))} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <XAxis dataKey="time" tick={{ fill: '#6b7280', fontSize: 12 }} />
+                      <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} />
+                      <Tooltip labelFormatter={(label: string) => `Time: ${label}`} />
+                      <Line type="monotone" dataKey="value" name="Temperature (°C)" stroke="#f59e0b" strokeWidth={3} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-4 text-sm text-muted-foreground">
+                  {todayAvgTemp !== null ? (
+                    <span>Today average temperature: <span className="text-foreground font-medium">{todayAvgTemp.toFixed(2)} °C</span></span>
+                  ) : (
+                    <span>No readings recorded today yet.</span>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-border/40 backdrop-blur-sm">
+              <CardHeader>
+                <CardTitle className="text-foreground">Recent pH Trend</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={storedSeries.map(d => ({ time: d.time, value: typeof d.ph === 'number' ? Number(d.ph.toFixed(2)) : undefined }))} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <XAxis dataKey="time" tick={{ fill: '#6b7280', fontSize: 12 }} />
+                      <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} />
+                      <Tooltip labelFormatter={(label: string) => `Time: ${label}`} />
+                      <Line type="monotone" dataKey="value" name="pH" stroke="#3b82f6" strokeWidth={3} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-border/40 backdrop-blur-sm">
+              <CardHeader>
+                <CardTitle className="text-foreground">Recent Chlorine Trend</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={storedSeries.map(d => ({ time: d.time, value: typeof d.chlorine === 'number' ? Number(d.chlorine.toFixed(2)) : undefined }))} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <XAxis dataKey="time" tick={{ fill: '#6b7280', fontSize: 12 }} />
+                      <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} />
+                      <Tooltip labelFormatter={(label: string) => `Time: ${label}`} />
+                      <Line type="monotone" dataKey="value" name="Chlorine (mg/L)" stroke="#14b8a6" strokeWidth={3} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-border/40 backdrop-blur-sm">
+              <CardHeader>
+                <CardTitle className="text-foreground">Recent Water Level Trend</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={storedSeries.map(d => ({ time: d.time, value: typeof d.level === 'number' ? Number(d.level.toFixed(2)) : undefined }))} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <XAxis dataKey="time" tick={{ fill: '#6b7280', fontSize: 12 }} />
+                      <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} />
+                      <Tooltip labelFormatter={(label: string) => `Time: ${label}`} />
+                      <Line type="monotone" dataKey="value" name="Water Level (cm)" stroke="#6366f1" strokeWidth={3} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
         </div>
 
         {/* Removed standalone Chlorine standard chart per request */}
@@ -281,12 +310,12 @@ const Dashboard = () => {
           <div className="flex items-start gap-3">
             <Activity className="w-5 h-5 text-primary mt-0.5" />
             <div>
-              <h2 className="text-lg font-semibold text-foreground mb-2">Real-time Demo Mode</h2>
+              <h2 className="text-lg font-semibold text-foreground mb-2">Real-time Data</h2>
               <p className="text-sm text-muted-foreground">
-                Currently showing simulated data updating every 3 seconds. Update your Firebase credentials in <code className="bg-muted px-2 py-1 rounded">src/lib/firebase.ts</code> to connect to your actual database.
+                pH, Temperature, and Water Level update from Firebase Realtime Database. Chlorine remains app-managed.
               </p>
               <p className="text-sm text-muted-foreground mt-2">
-                Expected Firebase data structure: <code className="bg-muted px-2 py-1 rounded">waterQuality/&#123;pH, chlorine, waterTemperature, waterLevel&#125;</code>
+                Averaged KPIs are saved every 10 minutes to <code className="bg-muted px-2 py-1 rounded">/storedvalues</code>.
               </p>
             </div>
           </div>

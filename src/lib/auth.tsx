@@ -5,6 +5,7 @@ type AuthUser = { username: string } | null;
 
 interface AuthContextValue {
   user: AuthUser;
+  initializing: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => void;
 }
@@ -21,6 +22,7 @@ async function hashPassword(password: string): Promise<string> {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser>(null);
+  const [initializing, setInitializing] = useState<boolean>(true);
 
   useEffect(() => {
     const saved = localStorage.getItem("auth:user");
@@ -29,6 +31,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(JSON.parse(saved));
       } catch {}
     }
+    setInitializing(false);
   }, []);
 
   useEffect(() => {
@@ -41,6 +44,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<AuthContextValue>(() => ({
     user,
+    initializing,
     logout: () => setUser(null),
     login: async (username: string, password: string) => {
       const res = await fetch("/api/login", {
@@ -55,7 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await res.json();
       setUser({ username: data.username });
     },
-  }), [user]);
+  }), [user, initializing]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
@@ -67,7 +71,8 @@ export function useAuth() {
 }
 
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { user } = useAuth();
+  const { user, initializing } = useAuth();
+  if (initializing) return null;
   if (!user) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }
